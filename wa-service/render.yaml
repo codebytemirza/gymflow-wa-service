@@ -1,0 +1,32 @@
+services:
+  - type: web
+    name: gymflow-wa-service
+    runtime: node
+    region: frankfurt         # pick region closest to your Supabase / Upstash
+    plan: free                # upgrade to starter ($7/mo) if you need always-on
+    rootDir: wa-service       # relative to repo root
+    buildCommand: npm install
+    startCommand: node index.js
+    healthCheckPath: /health
+    envVars:
+      # ── Supabase ─────────────────────────────────────────────
+      - key: NEXT_PUBLIC_SUPABASE_URL
+        sync: false           # set in Render dashboard
+      - key: SUPABASE_SERVICE_ROLE_KEY
+        sync: false
+
+      # ── Redis (Upstash) ───────────────────────────────────────
+      - key: REDIS_URL
+        sync: false
+
+      # ── Service auth ─────────────────────────────────────────
+      - key: WA_SERVICE_SECRET
+        sync: false
+
+      # ── Optional / fixed ─────────────────────────────────────
+      - key: WA_PORT
+        value: "10000"        # Render assigns the real port via $PORT; index.js already falls back to process.env.PORT
+      - key: NODE_ENV
+        value: production
+      - key: NEXT_PUBLIC_APP_URL
+        sync: false           # set to your Vercel / production frontend URL
