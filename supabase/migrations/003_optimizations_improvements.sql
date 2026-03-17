@@ -212,7 +212,7 @@ END;
 $$;
 
 -- Update cron job to use new version
-SELECT cron.unschedule('queue-payment-reminders');
+-- Note: This creates a new schedule with the same name, replacing the old one
 SELECT cron.schedule(
   'queue-payment-reminders',
   '5 0 * * *',
@@ -280,8 +280,7 @@ BEGIN
 END;
 $$;
 
--- Schedule cleanup job
-SELECT cron.unschedule('cleanup-rate-limits');
+-- Schedule cleanup job (new job, runs daily at 3 AM)
 SELECT cron.schedule(
   'cleanup-rate-limits',
   '0 3 * * *',  -- 3:00 AM daily

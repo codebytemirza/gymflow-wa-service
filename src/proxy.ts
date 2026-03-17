@@ -2,10 +2,11 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 /**
- * Next.js middleware — handles Supabase auth session refresh
- * and protects dashboard/admin routes.
+ * Next.js proxy route (replaces deprecated middleware).
+ * Handles Supabase auth session refresh and protects routes.
+ * See: https://nextjs.org/docs/messages/middleware-to-proxy
  */
-export async function middleware(request: NextRequest) {
+export async function proxy(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
   });
@@ -67,6 +68,7 @@ export async function middleware(request: NextRequest) {
   return supabaseResponse;
 }
 
+// Next.js proxy config
 export const config = {
   matcher: [
     "/((?!_next/static|_next/image|favicon.ico|.*\\.(?:svg|png|jpg|jpeg|gif|webp)$).*)",
