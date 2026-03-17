@@ -7,11 +7,11 @@ import { createClient } from '@/lib/supabase/server';
 
 export async function GET(req: NextRequest) {
   const supabase = await createClient();
-  
+
   const healthChecks = {
     api: { status: 'healthy' as const, latency: 0 },
-    database: { status: 'healthy' as const, latency: 0 },
-    auth: { status: 'healthy' as const, user: null as string | null },
+    database: { status: 'healthy' as 'healthy' | 'degraded' | 'unhealthy', latency: 0 },
+    auth: { status: 'healthy' as 'healthy' | 'degraded', user: null as string | null },
     timestamp: new Date().toISOString(),
   };
 
