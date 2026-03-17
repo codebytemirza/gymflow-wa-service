@@ -13,18 +13,77 @@ import pino from 'pino';
 import QRCode from 'qrcode';
 import supabase from './lib/supabase.js';
 import { useRedisAuthState, clearAuthState } from './lib/auth-state.js';
+import { validatePhone } from './lib/phone-utils.js';
 
 // Map of gymId → active socket
 const sockets = new Map();
 
-// Always silent — pino JSON blobs are too noisy in the console
-const logger = pino({ level: 'silent' });
+// Logger with proper configuration
+const logger = pino({
+  level: process.env.LOG_LEVEL || 'warn',
+  transport: process.env.NODE_ENV === 'development' ? { target: 'pino-pretty' } : undefined,
+});
+
+// Rate limiting configuration (WhatsApp limits: ~100 messages/hour for business)
+const RATE_LIMIT_CONFIG = {
+  maxMessages: parseInt(process.env.WA_RATE_LIMIT_MAX || '100', 10),
+  windowMs: parseInt(process.env.WA_RATE_LIMIT_WINDOW_MS || '3600000', 10), // 1 hour default
+};
+
+// Track message counts per gym: Map<gymId, { count, resetTime }>
+const rateLimitTracker = new Map();
+
+/**
+ * Check and update rate limit for a gym.
+ * @param {string} gymId
+ * @returns {{ allowed: boolean, remaining: number, resetIn: number }}
+ */
+function checkRateLimit(gymId) {
+  const now = Date.now();
+  const tracker = rateLimitTracker.get(gymId);
+
+  if (!tracker || now > tracker.resetTime) {
+    // Reset window
+    rateLimitTracker.set(gymId, {
+      count: 0,
+      resetTime: now + RATE_LIMIT_CONFIG.windowMs,
+    });
+    return {
+      allowed: true,
+      remaining: RATE_LIMIT_CONFIG.maxMessages,
+      resetIn: RATE_LIMIT_CONFIG.windowMs,
+    };
+  }
+
+  const remaining = RATE_LIMIT_CONFIG.maxMessages - tracker.count;
+  const resetIn = tracker.resetTime - now;
+
+  if (tracker.count >= RATE_LIMIT_CONFIG.maxMessages) {
+    return { allowed: false, remaining: 0, resetIn };
+  }
+
+  return { allowed: true, remaining, resetIn };
+}
+
+/**
+ * Increment message count for a gym.
+ * @param {string} gymId
+ */
+function incrementMessageCount(gymId) {
+  const tracker = rateLimitTracker.get(gymId);
+  if (tracker) {
+    tracker.count++;
+  }
+}
 
 /**
  * Update wa_sessions table in Supabase.
  */
 async function updateSession(gymId, patch) {
-  await supabase.from('wa_sessions').update(patch).eq('gym_id', gymId);
+  const { error } = await supabase.from('wa_sessions').update(patch).eq('gym_id', gymId);
+  if (error) {
+    logger.error({ gymId, error: error.message }, 'Failed to update session');
+  }
 }
 
 /**
@@ -96,10 +155,36 @@ export async function connectSocket(gymId) {
       const statusCode = lastDisconnect?.error?.output?.statusCode;
       const shouldReconnect = statusCode === DisconnectReason.restartRequired;
 
-      console.log(
-        `[WA:${gymId.slice(0, 8)}] Disconnected (${statusCode}) — autoReconnect: ${shouldReconnect}`
+      logger.info(
+        { gymId: gymId.slice(0, 8), statusCode, shouldReconnect },
+        `Disconnected — autoReconnect: ${shouldReconnect}`
       );
 
+      // Ban detection: 401 (Unauthorized) or 403 (Forbidden) usually means banned
+      if (statusCode === 401 || statusCode === 403) {
+        logger.error({ gymId: gymId.slice(0, 8), statusCode }, 'WhatsApp ban detected!');
+        await updateSession(gymId, {
+          status: 'banned',
+          qr_code: null,
+          disconnected_at: new Date().toISOString(),
+        });
+        sockets.delete(gymId);
+        clearAuthFiles(gymId);
+        console.log(`[WA:${gymId.slice(0, 8)}] ⚠️  BAN DETECTED — WhatsApp has banned this number!`);
+        return;
+      }
+
+      // Connection lost — try to reconnect
+      if (shouldReconnect) {
+        await updateSession(gymId, {
+          status: 'connecting',
+          qr_code: null,
+        });
+        setTimeout(() => connectSocket(gymId), 1000);
+        return;
+      }
+
+      // Full disconnect — clear auth and require re-pairing
       await updateSession(gymId, {
         status: 'disconnected',
         qr_code: null,
@@ -107,13 +192,8 @@ export async function connectSocket(gymId) {
       });
 
       sockets.delete(gymId);
-
-      if (shouldReconnect) {
-        setTimeout(() => connectSocket(gymId), 1000);
-      } else {
-        clearAuthFiles(gymId);
-        console.log(`[WA:${gymId.slice(0, 8)}] Auth cleared — go to dashboard to reconnect`);
-      }
+      clearAuthFiles(gymId);
+      console.log(`[WA:${gymId.slice(0, 8)}] Auth cleared — go to dashboard to reconnect`);
     }
   });
 
@@ -148,18 +228,91 @@ export function getSocket(gymId) {
 
 /**
  * Send a text WhatsApp message to a phone number.
- * Phone must be in E.164 format without '+': e.g. "923001234567"
+ * Phone number is validated and normalized automatically.
+ * Implements rate limiting to prevent WhatsApp bans.
+ *
  * @param {string} gymId
- * @param {string} phone
- * @param {string} text
+ * @param {string} phone - Phone number (any format, will be normalized)
+ * @param {string} text - Message text
+ * @returns {Promise<{ success: boolean, messageId?: string, error?: string, rateLimit?: object }>}
  */
 export async function sendTextMessage(gymId, phone, text) {
   const sock = getSocket(gymId);
-  if (!sock) throw new Error(`No active socket for gym ${gymId}`);
+  if (!sock) {
+    logger.error({ gymId }, 'No active socket for gym');
+    return { success: false, error: 'No active socket for this gym' };
+  }
 
-  // WhatsApp JID format: number@s.whatsapp.net
-  const jid = `${phone}@s.whatsapp.net`;
-  await sock.sendMessage(jid, { text });
+  // Validate phone number
+  const phoneValidation = validatePhone(phone);
+  if (!phoneValidation.valid) {
+    logger.warn({ gymId, phone, error: phoneValidation.error }, 'Invalid phone number');
+    return { success: false, error: phoneValidation.error };
+  }
+  const normalizedPhone = phoneValidation.normalized;
+
+  // Check rate limit
+  const rateLimit = checkRateLimit(gymId);
+  if (!rateLimit.allowed) {
+    const resetMinutes = Math.ceil(rateLimit.resetIn / 60000);
+    logger.warn({ gymId, resetIn: rateLimit.resetIn }, 'Rate limit exceeded');
+    return {
+      success: false,
+      error: `Rate limit exceeded. Try again in ${resetMinutes} minute(s).`,
+      rateLimit: {
+        remaining: 0,
+        resetIn: rateLimit.resetIn,
+        resetMinutes,
+      },
+    };
+  }
+
+  try {
+    // WhatsApp JID format: number@s.whatsapp.net
+    const jid = `${normalizedPhone}@s.whatsapp.net`;
+    const result = await sock.sendMessage(jid, { text });
+
+    // Increment message count after successful send
+    incrementMessageCount(gymId);
+
+    logger.info(
+      { gymId, phone: normalizedPhone.slice(0, 6) + '...', messageId: result?.key?.id },
+      'Message sent successfully'
+    );
+
+    return {
+      success: true,
+      messageId: result?.key?.id,
+      rateLimit: {
+        remaining: RATE_LIMIT_CONFIG.maxMessages - (rateLimitTracker.get(gymId)?.count || 0),
+        resetIn: rateLimit.resetIn,
+      },
+    };
+  } catch (err) {
+    logger.error(
+      { gymId, phone: normalizedPhone, error: err.message, stack: err.stack },
+      'Failed to send message'
+    );
+
+    // Check for specific error types
+    if (err.message?.includes('rate-overlimit')) {
+      return {
+        success: false,
+        error: 'WhatsApp rate limit exceeded. Please wait before sending more messages.',
+      };
+    }
+
+    if (err.message?.includes('not-authorized') || err.message?.includes('auth-revoked')) {
+      // Mark session as disconnected
+      await updateSession(gymId, { status: 'disconnected' });
+      return {
+        success: false,
+        error: 'WhatsApp session expired. Please reconnect.',
+      };
+    }
+
+    return { success: false, error: err.message };
+  }
 }
 
 /**

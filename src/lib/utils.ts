@@ -48,6 +48,42 @@ export function toE164(phone: string): string {
   return cleaned;
 }
 
+/**
+ * Validate phone number format
+ * Returns normalized phone if valid, null otherwise
+ */
+export function validatePhone(phone: string): { valid: boolean; normalized?: string; error?: string } {
+  const normalized = toE164(phone);
+  
+  // Check length (E.164 allows 10-15 digits)
+  if (normalized.length < 10 || normalized.length > 15) {
+    return {
+      valid: false,
+      error: "Invalid phone number format. Must be 10-15 digits.",
+    };
+  }
+  
+  // Check if numeric only
+  if (!/^\d+$/.test(normalized)) {
+    return {
+      valid: false,
+      error: "Phone number must contain only digits.",
+    };
+  }
+  
+  // Pakistan-specific validation
+  if (normalized.startsWith("92")) {
+    if (normalized.length !== 12) {
+      return {
+        valid: false,
+        error: "Pakistan numbers must be 12 digits (e.g., 923001234567)",
+      };
+    }
+  }
+  
+  return { valid: true, normalized };
+}
+
 /** App-wide constants */
 export const APP_NAME = process.env.NEXT_PUBLIC_APP_NAME || "GymFlow";
 

@@ -2,11 +2,10 @@ import { createServerClient } from "@supabase/ssr";
 import { NextResponse, type NextRequest } from "next/server";
 
 /**
- * Next.js proxy (middleware) — handles Supabase auth session refresh
+ * Next.js middleware — handles Supabase auth session refresh
  * and protects dashboard/admin routes.
- * Renamed from middleware.ts → proxy.ts for Next.js 16 compatibility.
  */
-export async function proxy(request: NextRequest) {
+export async function middleware(request: NextRequest) {
   let supabaseResponse = NextResponse.next({
     request,
   });
@@ -59,6 +58,11 @@ export async function proxy(request: NextRequest) {
     url.pathname = "/dashboard";
     return NextResponse.redirect(url);
   }
+
+  // Add security headers
+  supabaseResponse.headers.set("X-Frame-Options", "DENY");
+  supabaseResponse.headers.set("X-Content-Type-Options", "nosniff");
+  supabaseResponse.headers.set("Referrer-Policy", "strict-origin-when-cross-origin");
 
   return supabaseResponse;
 }

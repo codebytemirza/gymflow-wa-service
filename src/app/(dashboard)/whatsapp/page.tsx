@@ -23,6 +23,7 @@ import {
 } from "lucide-react";
 import { toast } from "sonner";
 import Image from "next/image";
+import { createClient } from "@/lib/supabase/client";
 
 type WaStatus = "connected" | "disconnected" | "connecting" | "banned";
 
@@ -70,6 +71,7 @@ const STATUS_CONFIG: Record<
 /**
  * WhatsApp connection page — shows QR code for pairing, live status,
  * and connect/disconnect controls.
+ * Uses Supabase Realtime for live status updates.
  */
 export default function WhatsAppPage() {
   const [status, setStatus] = useState<StatusResponse | null>(null);
@@ -88,12 +90,45 @@ export default function WhatsAppPage() {
     }
   }, []);
 
-  // Poll status every 4 seconds while connecting (waiting for QR / open)
+  // Initial fetch
   useEffect(() => {
     fetchStatus();
-    const interval = setInterval(fetchStatus, 4000);
-    return () => clearInterval(interval);
   }, [fetchStatus]);
+
+  // Supabase Realtime subscription for live updates
+  useEffect(() => {
+    const supabase = createClient();
+    
+    // Subscribe to wa_sessions changes
+    const channel = supabase
+      .channel('wa-session-realtime')
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'wa_sessions',
+        },
+        (payload) => {
+          const newStatus = payload.new as any;
+          setStatus((prev) => {
+            if (!prev) return prev;
+            return {
+              ...prev,
+              status: newStatus.status,
+              qrCode: newStatus.qr_code,
+              phoneNumber: newStatus.phone_number,
+              connectedAt: newStatus.connected_at,
+            };
+          });
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, []);
 
   async function handleConnect() {
     setConnecting(true);
@@ -125,6 +160,7 @@ export default function WhatsAppPage() {
   const StatusIcon = cfg.icon;
   const isConnected = status?.status === "connected";
   const isConnecting = status?.status === "connecting";
+  const isBanned = status?.status === "banned";
 
   return (
     <div className="space-y-6">
@@ -147,7 +183,9 @@ export default function WhatsAppPage() {
               </Badge>
             </div>
             <CardDescription>
-              {isConnected
+              {isBanned
+                ? "⚠️ This WhatsApp number has been banned. Please use a different number."
+                : isConnected
                 ? `Connected as +${status?.phoneNumber}`
                 : "Scan the QR code with your WhatsApp to connect."}
             </CardDescription>
@@ -181,7 +219,20 @@ export default function WhatsAppPage() {
             )}
 
             <div className="flex gap-3 pt-2">
-              {!isConnected ? (
+              {isBanned ? (
+                <Button
+                  onClick={handleConnect}
+                  disabled={connecting}
+                  className="bg-amber-600 hover:bg-amber-700"
+                >
+                  {connecting ? (
+                    <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+                  ) : (
+                    <RefreshCw className="mr-2 h-4 w-4" />
+                  )}
+                  Reconnect with New Number
+                </Button>
+              ) : !isConnected ? (
                 <Button
                   onClick={handleConnect}
                   disabled={connecting || isConnecting}
@@ -232,6 +283,15 @@ export default function WhatsAppPage() {
           <CardContent className="flex items-center justify-center py-6">
             {loading ? (
               <Skeleton className="h-52 w-52 rounded-xl" />
+            ) : isBanned ? (
+              <div className="flex flex-col items-center gap-3 text-red-500 dark:text-red-400">
+                <XCircle className="h-16 w-16" />
+                <p className="text-sm font-medium text-center">
+                  This number has been banned by WhatsApp.
+                  <br />
+                  Please reconnect with a different number.
+                </p>
+              </div>
             ) : status?.qrCode ? (
               <div className="overflow-hidden rounded-xl border border-zinc-200 bg-white p-3 shadow-sm dark:border-zinc-700">
                 {/* eslint-disable-next-line @next/next/no-img-element */}

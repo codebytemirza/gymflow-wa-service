@@ -11,12 +11,34 @@ import {
   disconnectSocket,
   getSocket,
   restoreConnectedGyms,
+  sendTextMessage,
 } from './socket-manager.js';
+import { validatePhone } from './lib/phone-utils.js';
 import './worker.js'; // start Bull worker
 
+// ──────────────────────────── Environment Validation ──────────
+
+const requiredEnvVars = [
+  'NEXT_PUBLIC_SUPABASE_URL',
+  'SUPABASE_SERVICE_ROLE_KEY',
+  'WA_SERVICE_SECRET',
+  'REDIS_URL',
+];
+
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    console.error(`❌ Missing required environment variable: ${envVar}`);
+    process.exit(1);
+  }
+}
+
+console.log('[WA Service] Environment validated ✓');
+
+// ──────────────────────────── App Setup ───────────────────────
+
 const app = express();
-app.use(express.json());
 app.use(cors({ origin: process.env.NEXT_PUBLIC_APP_URL ?? '*' }));
+app.use(express.json({ limit: '1mb' })); // Limit body size
 
 // ──────────────────────────── Auth middleware ─────────────────
 
@@ -100,27 +122,60 @@ app.post('/gym/:gymId/disconnect', authenticate, async (req, res) => {
 app.post('/gym/:gymId/send', authenticate, async (req, res) => {
   const { gymId } = req.params;
   const { phone, message } = req.body;
+
   if (!phone || !message) {
     return res.status(400).json({ error: 'phone and message are required' });
   }
-  // Validate E.164 without +: 10-15 digits, numeric only
-  if (!/^\d{10,15}$/.test(phone)) {
-    return res.status(400).json({ error: 'phone must be 10-15 digits, numeric only (no + or spaces)' });
+
+  // Validate phone using our utility
+  const phoneValidation = validatePhone(phone);
+  if (!phoneValidation.valid) {
+    return res.status(400).json({
+      error: phoneValidation.error,
+      code: 'INVALID_PHONE',
+    });
   }
+
+  // Validate message
   if (typeof message !== 'string' || message.trim().length === 0 || message.length > 4096) {
-    return res.status(400).json({ error: 'message must be a non-empty string (max 4096 chars)' });
+    return res.status(400).json({
+      error: 'message must be a non-empty string (max 4096 chars)',
+      code: 'INVALID_MESSAGE',
+    });
   }
+
   const sock = getSocket(gymId);
   if (!sock) {
-    return res.status(503).json({ error: 'WhatsApp not connected for this gym' });
+    return res.status(503).json({
+      error: 'WhatsApp not connected for this gym',
+      code: 'NOT_CONNECTED',
+    });
   }
+
   try {
-    const jid = `${phone}@s.whatsapp.net`;
-    await sock.sendMessage(jid, { text: message });
-    res.json({ ok: true });
+    const result = await sendTextMessage(gymId, phone, message);
+
+    if (!result.success) {
+      const statusCode = result.rateLimit ? 429 : 503;
+      return res.status(statusCode).json({
+        error: result.error,
+        code: result.rateLimit ? 'RATE_LIMIT_EXCEEDED' : 'SEND_FAILED',
+        rateLimit: result.rateLimit,
+        messageId: result.messageId,
+      });
+    }
+
+    res.json({
+      ok: true,
+      messageId: result.messageId,
+      rateLimit: result.rateLimit,
+    });
   } catch (err) {
     const isDev = process.env.NODE_ENV !== 'production';
-    res.status(500).json({ error: isDev ? err.message : 'Failed to send message' });
+    res.status(500).json({
+      error: isDev ? err.message : 'Failed to send message',
+      code: 'INTERNAL_ERROR',
+    });
   }
 });
 

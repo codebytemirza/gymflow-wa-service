@@ -6,11 +6,13 @@ import { Navbar } from "@/components/layout/navbar";
 import { cn } from "@/lib/utils";
 import { createClient } from "@/lib/supabase/client";
 import { Sheet, SheetContent } from "@/components/ui/sheet";
+import { ErrorBoundary } from "@/components/ui/error-boundary";
 import type { ProfileRow, GymRow } from "@/types/database.types";
 
 /**
  * Dashboard layout — dark sidebar + light content area.
  * Responsive: sidebar collapses to sheet on mobile.
+ * Includes error boundary for graceful error handling.
  */
 export default function DashboardLayout({
   children,
@@ -80,7 +82,9 @@ export default function DashboardLayout({
         )}
       >
         <Navbar onMenuToggle={() => setMobileOpen(true)} />
-        <main className="p-4 lg:p-6">{children}</main>
+        <main className="p-4 lg:p-6">
+          <ErrorBoundary>{children}</ErrorBoundary>
+        </main>
       </div>
     </div>
   );

@@ -13,7 +13,7 @@ import {
 } from "@/components/ui/card";
 import { Loader2, MessageSquare, AlertCircle } from "lucide-react";
 import { toast } from "sonner";
-import { formatCurrency, formatDate } from "@/lib/utils";
+import { formatCurrency, formatDate, toE164 } from "@/lib/utils";
 import type { PaymentRow, MemberRow, ProfileRow } from "@/types/database.types";
 
 interface OverduePayment extends PaymentRow {
@@ -74,17 +74,16 @@ export default function RemindersPage() {
     if (overdue.length === 0) return;
     setSendingAll(true);
     setProgress(0);
-    
+
     let successCount = 0;
     let failCount = 0;
 
     for (let i = 0; i < overdue.length; i++) {
         const payment = overdue[i];
         try {
-            let phone = payment.member_phone;
-            if (phone.startsWith("0")) phone = "92" + phone.slice(1);
-            if (phone.startsWith("+")) phone = phone.slice(1);
-
+            // Use proper phone normalization
+            const phone = toE164(payment.member_phone);
+            
             const message = `Hello ${payment.member_name}, this is a reminder from GymFlow. Your payment of ${formatCurrency(payment.amount)} was due on ${formatDate(payment.due_date)}. Please clear your dues at your earliest convenience. Thank you!`;
 
             const res = await fetch("/api/wa/send", {

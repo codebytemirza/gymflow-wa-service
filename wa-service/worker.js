@@ -8,6 +8,21 @@ import Bull from 'bull';
 import Redis from 'ioredis';
 import supabase from './lib/supabase.js';
 import { sendTextMessage } from './socket-manager.js';
+import { validatePhone } from './lib/phone-utils.js';
+
+// ──────────────────────────── Environment Validation ──────────
+
+const requiredEnvVars = ['REDIS_URL', 'NEXT_PUBLIC_SUPABASE_URL', 'SUPABASE_SERVICE_ROLE_KEY'];
+for (const envVar of requiredEnvVars) {
+  if (!process.env[envVar]) {
+    console.error(`❌ [Worker] Missing required environment variable: ${envVar}`);
+    process.exit(1);
+  }
+}
+
+console.log('[Worker] Environment validated ✓');
+
+// ──────────────────────────── Redis Setup ─────────────────────
 
 // Bull needs three independent Redis connections — create fresh ones per type
 function createRedisClient() {
@@ -37,7 +52,18 @@ reminderQueue.process(5 /* concurrency */, async (job) => {
 
   console.log(`[Worker] Sending ${type} to ${phone.slice(0, 6)}…`);
 
-  await sendTextMessage(gym_id, phone, message_text);
+  // Validate phone before sending
+  const phoneValidation = validatePhone(phone);
+  if (!phoneValidation.valid) {
+    console.error(`[Worker] Invalid phone ${phone}: ${phoneValidation.error}`);
+    throw new Error(`Invalid phone number: ${phoneValidation.error}`);
+  }
+
+  const result = await sendTextMessage(gym_id, phone, message_text);
+
+  if (!result.success) {
+    throw new Error(result.error || 'Failed to send message');
+  }
 
   // Mark as processed in Supabase
   await supabase
@@ -45,7 +71,7 @@ reminderQueue.process(5 /* concurrency */, async (job) => {
     .update({ processed: true })
     .eq('id', id);
 
-  // Log to reminder_logs
+  // Log to reminder_logs with message ID for tracking
   await supabase.from('reminder_logs').insert({
     gym_id,
     member_id,
@@ -53,9 +79,10 @@ reminderQueue.process(5 /* concurrency */, async (job) => {
     type,
     message_text,
     status: 'sent',
+    wa_message_id: result.messageId,
   });
 
-  console.log(`[Worker] ✓ Sent ${type} → ${phone.slice(0, 6)}…`);
+  console.log(`[Worker] ✓ Sent ${type} → ${phone.slice(0, 6)}… (ID: ${result.messageId})`);
 });
 
 reminderQueue.on('failed', async (job, err) => {
