@@ -3,7 +3,8 @@
     "allow": [
       "Bash(git init:*)",
       "Bash(gh auth:*)",
-      "Bash(git add:*)"
+      "Bash(git add:*)",
+      "Bash(vercel:*)"
     ]
   }
 }
